@@ -330,6 +330,7 @@ async function loadModels() {
 
     setLoad('Carregando ouvido (transcrição de áudio/vídeo)...', 34);
     asr = await pipeline('automatic-speech-recognition', 'Xenova/whisper-tiny', {
+      dtype: 'fp32',
       progress_callback: (p) => { if (p.progress) setLoad('Baixando ouvido: ' + Math.round(p.progress) + '%', 34 + p.progress * 0.16); }
     });
 
