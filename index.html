@@ -276,12 +276,13 @@ aiWorker.onerror = (err) => {
   setLoad('❌ Erro interno no worker de IA: ' + err.message, 0);
 };
 
-function callWorker(type, payload, onToken) {
+function callWorker(type, payload, onToken, transferList) {
   return new Promise((resolve, reject) => {
     const id = ++msgId;
     pending[id] = { resolve, reject };
     if (onToken) streamHandlers[id] = onToken;
-    aiWorker.postMessage({ id, type, payload });
+    if (transferList && transferList.length) aiWorker.postMessage({ id, type, payload }, transferList);
+    else aiWorker.postMessage({ id, type, payload });
   });
 }
 
@@ -410,6 +411,7 @@ const folderMeta = {
   audio: { emoji: '🎵', label: 'Áudios' },
   video: { emoji: '🎬', label: 'Vídeos' },
   text:  { emoji: '📄', label: 'Textos' },
+  memory:{ emoji: '🧠', label: 'Aprendido no chat' },
   other: { emoji: '📁', label: 'Outros' },
 };
 
@@ -568,6 +570,23 @@ async function respond(userText) {
     updateMessage(botId, escapeHtml(finalText));
     await addMessage({ role: 'user', content: userText, createdAt: Date.now() });
     await addMessage({ role: 'assistant', content: finalText, createdAt: Date.now() });
+
+    // Vira memória permanente e pesquisável, igual um arquivo enviado
+    const memText = `Usuário disse: ${userText}\nEu respondi: ${finalText}`;
+    const memEmbedding = await embed(memText);
+    if (memEmbedding) {
+      await addItem({
+        type: 'memory',
+        name: userText.slice(0, 40) + (userText.length > 40 ? '...' : ''),
+        mime: 'text/plain',
+        blob: new Blob([memText], { type: 'text/plain' }),
+        text: memText,
+        embedding: memEmbedding,
+        createdAt: Date.now()
+      });
+      refreshFolderCounts();
+    }
+
     relevant.forEach(item => appendAttachment(botId, item));
     speak(finalText);
   } catch (err) {
