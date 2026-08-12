@@ -335,7 +335,7 @@ async function loadModels() {
 
     setLoad('Carregando cérebro (modelo de linguagem)... isso é o mais pesado', 50);
     generator = await pipeline('text-generation', 'onnx-community/Qwen2.5-0.5B-Instruct', {
-      dtype: 'q4',
+      dtype: 'q8',
       progress_callback: (p) => { if (p.progress) setLoad('Baixando cérebro: ' + Math.round(p.progress) + '%', 50 + p.progress * 0.5); }
     });
 
