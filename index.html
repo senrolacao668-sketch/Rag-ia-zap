@@ -62,6 +62,15 @@
   .progress-track { background: #0b141a; border-radius: 6px; height: 6px; overflow: hidden; }
   .progress-fill { background: linear-gradient(90deg,#00a884,#53bdeb); height: 100%; width: 0%; transition: width .2s; }
 
+  /* Banner de "processando" (não bloqueia a UI) */
+  .busy-banner {
+    background: #1f2c34; color: #f1bf26; font-size: 12px; padding: 8px 14px;
+    border-bottom: 1px solid #313d45; z-index: 15; display: none; align-items: center; gap: 8px;
+  }
+  .busy-banner.show { display: flex; }
+  .spin { display:inline-block; width:12px; height:12px; border:2px solid #f1bf26; border-top-color: transparent; border-radius:50%; animation: spin 0.8s linear infinite; flex-shrink:0; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
   /* Painel de configurações / pastas */
   .settings-panel {
     position: absolute; top: 0; left: 0; right: 0; bottom: 0;
@@ -133,6 +142,7 @@
     background-color: #2a3942; color: #aebac1; border: none; width: 42px; height: 42px; border-radius: 50%;
     display: flex; justify-content: center; align-items: center; cursor: pointer; font-size: 18px; flex-shrink:0;
   }
+  .round-btn:disabled { opacity: 0.4; }
   .send-btn { background-color: #00a884; color: white; }
   .send-btn:active, .round-btn:active { transform: scale(0.94); }
   .mic-btn.recording { background-color: #d9534f; color: white; animation: pulse 1s infinite; }
@@ -159,6 +169,8 @@
     <div class="progress-track"><div class="progress-fill" id="load-fill"></div></div>
   </div>
 
+  <div class="busy-banner" id="busy-banner"><span class="spin"></span><span id="busy-text">Processando em segundo plano — a tela continua livre, pode usar.</span></div>
+
   <div class="settings-panel" id="settings-panel">
     <div class="settings-header">
       <button class="back-btn" id="settings-back">←</button>
@@ -179,11 +191,101 @@
 </div>
 
 <script type="module">
-import { pipeline, TextStreamer, env } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@4';
+/* =====================================================================
+   ARQUITETURA: a IA (embeddings + transcrição + geração de texto) roda
+   inteira dentro de um Web Worker. Isso é o que resolve o travamento:
+   o processamento pesado fica numa thread separada da tela, então os
+   botões continuam clicáveis mesmo enquanto o modelo está "pensando".
+   ===================================================================== */
 
-env.allowLocalModels = false;
+const WORKER_SOURCE = `
+import { pipeline, TextStreamer } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@4';
 
-/* ================= IndexedDB ================= */
+let embedder = null, asr = null, generator = null;
+
+function reply(id, ok, data, error) {
+  postMessage({ id, type: 'result', ok, data, error });
+}
+
+self.onmessage = async (e) => {
+  const { id, type, payload } = e.data;
+  try {
+    if (type === 'load') {
+      embedder = await pipeline('feature-extraction', 'Xenova/multilingual-e5-small', {
+        progress_callback: (p) => postMessage({ type: 'progress', stage: 'embedder', data: p })
+      });
+      asr = await pipeline('automatic-speech-recognition', 'Xenova/whisper-tiny', {
+        dtype: 'fp32',
+        progress_callback: (p) => postMessage({ type: 'progress', stage: 'asr', data: p })
+      });
+      generator = await pipeline('text-generation', 'onnx-community/Qwen2.5-0.5B-Instruct', {
+        dtype: 'q8',
+        progress_callback: (p) => postMessage({ type: 'progress', stage: 'generator', data: p })
+      });
+      reply(id, true, true);
+
+    } else if (type === 'embed') {
+      if (!payload.text || !payload.text.trim()) { reply(id, true, null); return; }
+      const out = await embedder(payload.text, { pooling: 'mean', normalize: true });
+      reply(id, true, Array.from(out.data));
+
+    } else if (type === 'transcribe') {
+      const blob = new Blob([payload.buf], { type: payload.mime });
+      const url = URL.createObjectURL(blob);
+      const result = await asr(url, { language: 'portuguese' });
+      URL.revokeObjectURL(url);
+      reply(id, true, (result && result.text) ? result.text.trim() : '');
+
+    } else if (type === 'generate') {
+      const streamer = new TextStreamer(generator.tokenizer, {
+        skip_prompt: true,
+        skip_special_tokens: true,
+        callback_function: (tok) => postMessage({ id, type: 'stream', token: tok })
+      });
+      const out = await generator(payload.messages, { max_new_tokens: 220, temperature: 0.7, do_sample: true, streamer });
+      const finalText = out[0].generated_text.at(-1).content.trim();
+      reply(id, true, finalText);
+    }
+  } catch (err) {
+    reply(id, false, null, err && err.message ? err.message : String(err));
+  }
+};
+`;
+
+const workerBlob = new Blob([WORKER_SOURCE], { type: 'text/javascript' });
+const aiWorker = new Worker(URL.createObjectURL(workerBlob), { type: 'module' });
+
+let msgId = 0;
+const pending = {};
+const streamHandlers = {};
+
+aiWorker.onmessage = (e) => {
+  const d = e.data;
+  if (d.type === 'progress') { handleProgress(d.stage, d.data); return; }
+  if (d.type === 'stream') { const h = streamHandlers[d.id]; if (h) h(d.token); return; }
+  if (d.type === 'result') {
+    const p = pending[d.id];
+    if (!p) return;
+    delete pending[d.id];
+    delete streamHandlers[d.id];
+    if (d.ok) p.resolve(d.data); else p.reject(new Error(d.error));
+  }
+};
+aiWorker.onerror = (err) => {
+  console.error('Worker error:', err);
+  setLoad('❌ Erro interno no worker de IA: ' + err.message, 0);
+};
+
+function callWorker(type, payload, onToken) {
+  return new Promise((resolve, reject) => {
+    const id = ++msgId;
+    pending[id] = { resolve, reject };
+    if (onToken) streamHandlers[id] = onToken;
+    aiWorker.postMessage({ id, type, payload });
+  });
+}
+
+/* ================= IndexedDB (fica na thread principal) ================= */
 const DB_NAME = 'devchat_ia_db';
 const DB_VERSION = 1;
 let dbPromise = new Promise((resolve, reject) => {
@@ -201,17 +303,6 @@ let dbPromise = new Promise((resolve, reject) => {
   req.onsuccess = () => resolve(req.result);
   req.onerror = () => reject(req.error);
 });
-
-async function dbAction(storeName, mode, fn) {
-  const db = await dbPromise;
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(storeName, mode);
-    const store = tx.objectStore(storeName);
-    const result = fn(store);
-    tx.oncomplete = () => resolve(result && result.__req ? result.__req.result : result);
-    tx.onerror = () => reject(tx.error);
-  });
-}
 
 function addItem(item) {
   return new Promise(async (resolve, reject) => {
@@ -262,6 +353,11 @@ function getAllMessages() {
 /* ================= UI helpers ================= */
 const chat = document.getElementById('chat');
 const input = document.getElementById('msg-input');
+const sendBtn = document.getElementById('send-btn');
+const attachBtn = document.getElementById('attach-btn');
+const micBtn = document.getElementById('mic-btn');
+const busyBanner = document.getElementById('busy-banner');
+const busyText = document.getElementById('busy-text');
 let msgCounter = 0;
 
 function escapeHtml(s){
@@ -301,6 +397,14 @@ function appendAttachment(msgId, item) {
   chat.scrollTop = chat.scrollHeight;
 }
 
+function setBusy(on, text) {
+  busyBanner.classList.toggle('show', on);
+  if (text) busyText.textContent = text;
+  sendBtn.disabled = on;
+  attachBtn.disabled = on;
+  micBtn.disabled = on;
+}
+
 const folderMeta = {
   image: { emoji: '📷', label: 'Imagens' },
   audio: { emoji: '🎵', label: 'Áudios' },
@@ -309,8 +413,8 @@ const folderMeta = {
   other: { emoji: '📁', label: 'Outros' },
 };
 
-/* ================= Modelos (transformers.js) ================= */
-let embedder = null, asr = null, generator = null, modelsReady = false;
+/* ================= Carregamento dos modelos ================= */
+let modelsReady = false;
 const headerStatus = document.getElementById('header-status');
 const loadBanner = document.getElementById('load-banner');
 const loadText = document.getElementById('load-text');
@@ -321,30 +425,22 @@ function setLoad(text, pct) {
   if (typeof pct === 'number') loadFill.style.width = Math.max(0, Math.min(100, pct)) + '%';
 }
 
+function handleProgress(stage, p) {
+  if (!p || typeof p.progress !== 'number') return;
+  if (stage === 'embedder') setLoad('Baixando memória semântica: ' + Math.round(p.progress) + '%', p.progress * 0.33);
+  else if (stage === 'asr') setLoad('Baixando ouvido (transcrição): ' + Math.round(p.progress) + '%', 34 + p.progress * 0.16);
+  else if (stage === 'generator') setLoad('Baixando cérebro (modelo de linguagem): ' + Math.round(p.progress) + '%', 50 + p.progress * 0.5);
+}
+
 async function loadModels() {
   try {
-    setLoad('Carregando memória semântica (busca inteligente)...', 5);
-    embedder = await pipeline('feature-extraction', 'Xenova/multilingual-e5-small', {
-      progress_callback: (p) => { if (p.progress) setLoad('Baixando memória semântica: ' + Math.round(p.progress) + '%', p.progress * 0.33); }
-    });
-
-    setLoad('Carregando ouvido (transcrição de áudio/vídeo)...', 34);
-    asr = await pipeline('automatic-speech-recognition', 'Xenova/whisper-tiny', {
-      dtype: 'fp32',
-      progress_callback: (p) => { if (p.progress) setLoad('Baixando ouvido: ' + Math.round(p.progress) + '%', 34 + p.progress * 0.16); }
-    });
-
-    setLoad('Carregando cérebro (modelo de linguagem)... isso é o mais pesado', 50);
-    generator = await pipeline('text-generation', 'onnx-community/Qwen2.5-0.5B-Instruct', {
-      dtype: 'q8',
-      progress_callback: (p) => { if (p.progress) setLoad('Baixando cérebro: ' + Math.round(p.progress) + '%', 50 + p.progress * 0.5); }
-    });
-
+    setLoad('Carregando modelos de IA no seu celular (só na primeira vez)...', 2);
+    await callWorker('load', {});
     modelsReady = true;
     setLoad('Tudo pronto! ✅', 100);
     headerStatus.textContent = 'Online — rodando local no celular';
     setTimeout(() => { loadBanner.style.display = 'none'; }, 900);
-    appendMessage('Pronto! 🧠 Estou rodando <b>inteiramente no seu celular</b>, sem internet nem API externa depois deste carregamento. Manda foto, áudio, vídeo ou texto pelo 📎 que eu guardo e uso pra te responder melhor. Toca no 🎤 pra falar comigo.', 'msg-bot');
+    appendMessage('Pronto! 🧠 Estou rodando <b>inteiramente no seu celular</b>, numa thread separada da tela — então mesmo processando, os botões continuam funcionando. Manda foto, áudio, vídeo ou texto pelo 📎 que eu guardo e uso pra te responder melhor. Toca no 🎤 pra falar comigo.', 'msg-bot');
   } catch (err) {
     console.error(err);
     setLoad('❌ Erro ao carregar: ' + err.message, 0);
@@ -354,9 +450,8 @@ async function loadModels() {
 }
 
 async function embed(text) {
-  if (!embedder || !text || !text.trim()) return null;
-  const out = await embedder(text, { pooling: 'mean', normalize: true });
-  return Array.from(out.data);
+  if (!text || !text.trim()) return null;
+  return await callWorker('embed', { text });
 }
 
 function cosine(a, b) {
@@ -396,17 +491,19 @@ async function handleFile(file) {
     const caption = window.prompt(`Descreva rapidamente "${file.name}" (ajuda a IA a lembrar depois, pode deixar em branco):`, '');
     textContent = caption || '';
   } else if (type === 'audio' || type === 'video') {
-    const statusId = appendMessage(`🎙️ Transcrevendo ${escapeHtml(file.name)} localmente...`, 'msg-system');
+    const statusId = appendMessage(`🎙️ Transcrevendo ${escapeHtml(file.name)} em segundo plano (a tela continua livre)...`, 'msg-system');
+    setBusy(true, 'Transcrevendo ' + file.name + '...');
     try {
-      const url = URL.createObjectURL(file);
-      const result = await asr(url, { language: 'portuguese' });
-      textContent = (result && result.text) ? result.text.trim() : '';
+      const buf = await file.arrayBuffer();
+      textContent = await callWorker('transcribe', { buf, mime: file.type }, null, [buf]);
       updateMessage(statusId, textContent
         ? `✅ Transcrição de ${escapeHtml(file.name)}: "${escapeHtml(textContent.slice(0, 180))}${textContent.length > 180 ? '...' : ''}"`
         : `⚠️ Não veio texto na transcrição de ${escapeHtml(file.name)}.`);
     } catch (err) {
       console.error(err);
-      updateMessage(statusId, `⚠️ Não consegui transcrever ${escapeHtml(file.name)} automaticamente (formato pode não ser suportado). Vou indexar só pelo nome.`);
+      updateMessage(statusId, `⚠️ Não consegui transcrever ${escapeHtml(file.name)} automaticamente. Vou indexar só pelo nome.`);
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -417,7 +514,7 @@ async function handleFile(file) {
   refreshFolderCounts();
 }
 
-document.getElementById('attach-btn').addEventListener('click', () => {
+attachBtn.addEventListener('click', () => {
   if (!modelsReady) { appendMessage('⏳ Espera os modelos terminarem de carregar pra eu conseguir indexar direito.', 'msg-system'); return; }
   document.getElementById('file-input').click();
 });
@@ -435,47 +532,50 @@ async function getRecentHistory(limit = 6) {
 
 async function respond(userText) {
   if (!modelsReady) { appendMessage('⏳ Os modelos ainda estão carregando, espera um pouco...', 'msg-system'); return; }
+
+  setBusy(true, 'Pensando na resposta (pode levar um tempinho no seu aparelho)...');
   const typingId = appendMessage('digitando...', 'msg-bot typing');
 
-  const relevant = await retrieve(userText, 3);
-  const contextText = relevant.length
-    ? relevant.map(r => `- [${folderMeta[r.type].label}] ${r.name}: ${(r.text || '(sem descrição)').slice(0, 300)}`).join('\n')
-    : 'Nada relevante encontrado na memória do usuário para esta pergunta.';
-
-  const history = await getRecentHistory(6);
-
-  const messages = [
-    { role: 'system', content:
-      'Você é a IA pessoal do DiamanteBlack, rodando 100% local no celular dele, sem servidor externo. ' +
-      'Responda sempre em português do Brasil, de forma direta, natural e inteligente — nunca com respostas decoradas ou robóticas. ' +
-      'Você tem acesso a uma memória (RAG) com arquivos que o usuário guardou no celular (fotos, áudios, vídeos, textos). ' +
-      'Use o CONTEXTO abaixo somente se for realmente relevante para a pergunta; se não for, ignore e responda normalmente. ' +
-      'Quando um item do contexto for relevante, cite o nome do arquivo na resposta.\n\nCONTEXTO DA MEMÓRIA:\n' + contextText
-    },
-    ...history,
-    { role: 'user', content: userText }
-  ];
-
-  removeMessage(typingId);
-  const botId = appendMessage('▍', 'msg-bot');
-  let acc = '';
   try {
-    const streamer = new TextStreamer(generator.tokenizer, {
-      skip_prompt: true,
-      skip_special_tokens: true,
-      callback_function: (tok) => { acc += tok; updateMessage(botId, escapeHtml(acc) + '▍'); }
+    const relevant = await retrieve(userText, 3);
+    const contextText = relevant.length
+      ? relevant.map(r => `- [${folderMeta[r.type].label}] ${r.name}: ${(r.text || '(sem descrição)').slice(0, 300)}`).join('\n')
+      : 'Nada relevante encontrado na memória do usuário para esta pergunta.';
+
+    const history = await getRecentHistory(6);
+
+    const messages = [
+      { role: 'system', content:
+        'Você é a IA pessoal do DiamanteBlack, rodando 100% local no celular dele, sem servidor externo. ' +
+        'Responda sempre em português do Brasil, de forma direta, natural e inteligente — nunca com respostas decoradas ou robóticas. ' +
+        'Você tem acesso a uma memória (RAG) com arquivos que o usuário guardou no celular (fotos, áudios, vídeos, textos). ' +
+        'Use o CONTEXTO abaixo somente se for realmente relevante para a pergunta; se não for, ignore e responda normalmente. ' +
+        'Quando um item do contexto for relevante, cite o nome do arquivo na resposta.\n\nCONTEXTO DA MEMÓRIA:\n' + contextText
+      },
+      ...history,
+      { role: 'user', content: userText }
+    ];
+
+    removeMessage(typingId);
+    const botId = appendMessage('▍', 'msg-bot');
+    let acc = '';
+
+    const finalText = await callWorker('generate', { messages }, (tok) => {
+      acc += tok;
+      updateMessage(botId, escapeHtml(acc) + '▍');
     });
-    const out = await generator(messages, { max_new_tokens: 220, temperature: 0.7, do_sample: true, streamer });
-    const finalText = out[0].generated_text.at(-1).content.trim();
+
     updateMessage(botId, escapeHtml(finalText));
     await addMessage({ role: 'user', content: userText, createdAt: Date.now() });
     await addMessage({ role: 'assistant', content: finalText, createdAt: Date.now() });
-
     relevant.forEach(item => appendAttachment(botId, item));
     speak(finalText);
   } catch (err) {
     console.error(err);
-    updateMessage(botId, '⚠️ Deu erro ao gerar a resposta: ' + escapeHtml(err.message));
+    removeMessage(typingId);
+    appendMessage('⚠️ Deu erro ao gerar a resposta: ' + escapeHtml(err.message), 'msg-system');
+  } finally {
+    setBusy(false);
   }
 }
 
@@ -486,7 +586,7 @@ async function sendMessage() {
   input.value = '';
   await respond(text);
 }
-document.getElementById('send-btn').addEventListener('click', sendMessage);
+sendBtn.addEventListener('click', sendMessage);
 input.addEventListener('keypress', (e) => { if (e.key === 'Enter') sendMessage(); });
 
 /* ================= Voz (entrada e saída) ================= */
@@ -505,7 +605,6 @@ function speak(text) {
   window.speechSynthesis.speak(u);
 }
 
-const micBtn = document.getElementById('mic-btn');
 let recognition = null;
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 if (SR) {
