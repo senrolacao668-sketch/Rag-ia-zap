@@ -1,0 +1,614 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>DevChat IA — Assistente Local</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; -webkit-tap-highlight-color: transparent; }
+  html, body { height: 100%; overscroll-behavior: none; }
+  body {
+    background-color: #0b141a;
+    display: flex;
+    justify-content: center;
+    height: 100vh;
+  }
+  .app-container {
+    width: 100%;
+    max-width: 420px;
+    background-color: #0b141a;
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    position: relative;
+    overflow: hidden;
+  }
+
+  /* Cabeçalho */
+  .header {
+    background-color: #202c33;
+    padding: 12px 15px;
+    display: flex;
+    align-items: center;
+    color: #e9edef;
+    border-bottom: 1px solid #313d45;
+    z-index: 20;
+  }
+  .avatar {
+    width: 40px; height: 40px;
+    background: linear-gradient(135deg, #00a884, #008a6c);
+    border-radius: 50%;
+    display: flex; justify-content: center; align-items: center;
+    font-weight: bold; margin-right: 12px; color: white; flex-shrink: 0;
+  }
+  .contact-info { flex: 1; min-width: 0; }
+  .contact-info h2 { font-size: 15px; margin-bottom: 2px; }
+  .contact-info p { font-size: 11px; color: #8696a0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .header-actions { display: flex; gap: 6px; }
+  .icon-btn {
+    background: transparent; border: none; color: #aebac1; font-size: 19px;
+    width: 36px; height: 36px; border-radius: 50%; display:flex; align-items:center; justify-content:center;
+    cursor: pointer;
+  }
+  .icon-btn:active { background: rgba(255,255,255,0.08); }
+  .icon-btn.active-tts { color: #00a884; }
+
+  /* Barra de progresso de carregamento dos modelos */
+  .load-banner {
+    background: #1f2c34; color: #d1d7db; font-size: 12px; padding: 10px 14px;
+    border-bottom: 1px solid #313d45; z-index: 15;
+  }
+  .load-banner .txt { margin-bottom: 6px; }
+  .progress-track { background: #0b141a; border-radius: 6px; height: 6px; overflow: hidden; }
+  .progress-fill { background: linear-gradient(90deg,#00a884,#53bdeb); height: 100%; width: 0%; transition: width .2s; }
+
+  /* Painel de configurações / pastas */
+  .settings-panel {
+    position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+    background: #111b21; z-index: 30; display: none; flex-direction: column;
+  }
+  .settings-panel.open { display: flex; }
+  .settings-header {
+    background: #202c33; color: #e9edef; padding: 14px 15px; display:flex; align-items:center; gap:12px;
+    border-bottom: 1px solid #313d45;
+  }
+  .settings-header h3 { font-size: 16px; font-weight: 600; }
+  .settings-body { flex: 1; overflow-y: auto; padding: 10px; }
+  .folder-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 14px; }
+  .folder-card {
+    background: #202c33; border-radius: 10px; padding: 14px; color: #e9edef; cursor: pointer;
+    display:flex; flex-direction:column; gap:4px;
+  }
+  .folder-card:active { background: #2a3942; }
+  .folder-card .emoji { font-size: 22px; }
+  .folder-card .label { font-size: 13px; color: #aebac1; }
+  .folder-card .count { font-size: 18px; font-weight: 700; }
+  .storage-info { color: #8696a0; font-size: 11px; padding: 4px 4px 12px; }
+  .file-list { display: flex; flex-direction: column; gap: 8px; }
+  .file-row {
+    background: #1f2c34; border-radius: 10px; padding: 10px; display:flex; gap:10px; align-items:center; color:#e9edef;
+  }
+  .file-row .thumb { width:44px; height:44px; border-radius:8px; object-fit:cover; background:#0b141a; flex-shrink:0; display:flex;align-items:center;justify-content:center; font-size:20px; }
+  .file-row .meta { flex: 1; min-width: 0; }
+  .file-row .meta .name { font-size: 13px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .file-row .meta .desc { font-size: 11px; color:#8696a0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .file-row .del { background:none; border:none; color:#e18a8a; font-size:18px; cursor:pointer; }
+  .back-btn { background:none; border:none; color:#e9edef; font-size:20px; cursor:pointer; }
+  .empty-hint { color:#8696a0; font-size:13px; text-align:center; padding: 30px 10px; }
+
+  /* Área de Chat */
+  .chat-area {
+    flex: 1; padding: 16px; overflow-y: auto;
+    background-image: url('https://user-images.githubusercontent.com/15075759/28719144-86dc0f70-73b1-11e7-911d-60d70fcded21.png');
+    background-size: cover;
+    display: flex; flex-direction: column; gap: 10px;
+  }
+  .message {
+    max-width: 82%; padding: 8px 12px; border-radius: 7.5px; font-size: 14.5px;
+    position: relative; line-height: 1.4; word-wrap: break-word;
+  }
+  .msg-bot { background-color: #202c33; color: #e9edef; align-self: flex-start; border-top-left-radius: 0; }
+  .msg-user { background-color: #005c4b; color: #e9edef; align-self: flex-end; border-top-right-radius: 0; }
+  .msg-system {
+    background: rgba(32,44,51,0.85); color: #f1bf26; align-self: center; font-size: 12px;
+    text-align: center; font-family: monospace; padding: 5px 10px; border-radius: 10px; max-width: 92%;
+  }
+  .msg-bot.typing { color: #8696a0; font-style: italic; }
+  .attach-wrap { margin-top: 6px; display:flex; flex-direction:column; gap:6px; }
+  .attach-wrap img { max-width: 100%; border-radius: 6px; display:block; }
+  .attach-wrap video { max-width: 100%; border-radius: 6px; display:block; }
+  .attach-wrap audio { width: 100%; }
+  .attach-label { font-size: 11px; color: #8696a0; }
+
+  /* Input */
+  .input-area {
+    background-color: #202c33; padding: 8px; display: flex; gap: 8px; align-items: center;
+  }
+  .input-area input[type=text] {
+    flex: 1; background-color: #2a3942; border: none; padding: 12px 15px; border-radius: 20px;
+    color: #e9edef; font-size: 15px; outline: none; min-width: 0;
+  }
+  .input-area input::placeholder { color: #8696a0; }
+  .round-btn {
+    background-color: #2a3942; color: #aebac1; border: none; width: 42px; height: 42px; border-radius: 50%;
+    display: flex; justify-content: center; align-items: center; cursor: pointer; font-size: 18px; flex-shrink:0;
+  }
+  .send-btn { background-color: #00a884; color: white; }
+  .send-btn:active, .round-btn:active { transform: scale(0.94); }
+  .mic-btn.recording { background-color: #d9534f; color: white; animation: pulse 1s infinite; }
+  @keyframes pulse { 0%{box-shadow:0 0 0 0 rgba(217,83,79,.6);} 70%{box-shadow:0 0 0 10px rgba(217,83,79,0);} 100%{box-shadow:0 0 0 0 rgba(217,83,79,0);} }
+</style>
+</head>
+<body>
+
+<div class="app-container">
+  <div class="header">
+    <div class="avatar">IA</div>
+    <div class="contact-info">
+      <h2>Minha IA (100% local)</h2>
+      <p id="header-status">Iniciando...</p>
+    </div>
+    <div class="header-actions">
+      <button class="icon-btn active-tts" id="tts-toggle" title="Ligar/desligar voz">🔊</button>
+      <button class="icon-btn" id="settings-btn" title="Pastas e memória">⚙️</button>
+    </div>
+  </div>
+
+  <div class="load-banner" id="load-banner">
+    <div class="txt" id="load-text">Carregando modelos de IA no seu celular (só na primeira vez)...</div>
+    <div class="progress-track"><div class="progress-fill" id="load-fill"></div></div>
+  </div>
+
+  <div class="settings-panel" id="settings-panel">
+    <div class="settings-header">
+      <button class="back-btn" id="settings-back">←</button>
+      <h3 id="settings-title">Memória da IA</h3>
+    </div>
+    <div class="settings-body" id="settings-body"></div>
+  </div>
+
+  <div class="chat-area" id="chat"></div>
+
+  <div class="input-area">
+    <button class="round-btn" id="attach-btn" title="Enviar arquivo">📎</button>
+    <input type="text" id="msg-input" placeholder="Digite ou fale algo...">
+    <button class="round-btn mic-btn" id="mic-btn" title="Falar">🎤</button>
+    <button class="round-btn send-btn" id="send-btn" title="Enviar">➤</button>
+  </div>
+  <input type="file" id="file-input" multiple style="display:none" accept="image/*,audio/*,video/*,text/*,.pdf,.md">
+</div>
+
+<script type="module">
+import { pipeline, TextStreamer, env } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@4';
+
+env.allowLocalModels = false;
+
+/* ================= IndexedDB ================= */
+const DB_NAME = 'devchat_ia_db';
+const DB_VERSION = 1;
+let dbPromise = new Promise((resolve, reject) => {
+  const req = indexedDB.open(DB_NAME, DB_VERSION);
+  req.onupgradeneeded = (e) => {
+    const db = e.target.result;
+    if (!db.objectStoreNames.contains('items')) {
+      const store = db.createObjectStore('items', { keyPath: 'id', autoIncrement: true });
+      store.createIndex('type', 'type', { unique: false });
+    }
+    if (!db.objectStoreNames.contains('messages')) {
+      db.createObjectStore('messages', { keyPath: 'id', autoIncrement: true });
+    }
+  };
+  req.onsuccess = () => resolve(req.result);
+  req.onerror = () => reject(req.error);
+});
+
+async function dbAction(storeName, mode, fn) {
+  const db = await dbPromise;
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(storeName, mode);
+    const store = tx.objectStore(storeName);
+    const result = fn(store);
+    tx.oncomplete = () => resolve(result && result.__req ? result.__req.result : result);
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+function addItem(item) {
+  return new Promise(async (resolve, reject) => {
+    const db = await dbPromise;
+    const tx = db.transaction('items', 'readwrite');
+    const req = tx.objectStore('items').add(item);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+function getAllItems() {
+  return new Promise(async (resolve, reject) => {
+    const db = await dbPromise;
+    const tx = db.transaction('items', 'readonly');
+    const req = tx.objectStore('items').getAll();
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+function deleteItem(id) {
+  return new Promise(async (resolve, reject) => {
+    const db = await dbPromise;
+    const tx = db.transaction('items', 'readwrite');
+    tx.objectStore('items').delete(id);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+function addMessage(msg) {
+  return new Promise(async (resolve, reject) => {
+    const db = await dbPromise;
+    const tx = db.transaction('messages', 'readwrite');
+    const req = tx.objectStore('messages').add(msg);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+function getAllMessages() {
+  return new Promise(async (resolve, reject) => {
+    const db = await dbPromise;
+    const tx = db.transaction('messages', 'readonly');
+    const req = tx.objectStore('messages').getAll();
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+/* ================= UI helpers ================= */
+const chat = document.getElementById('chat');
+const input = document.getElementById('msg-input');
+let msgCounter = 0;
+
+function escapeHtml(s){
+  return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function appendMessage(html, cls) {
+  const id = 'm' + (++msgCounter);
+  const div = document.createElement('div');
+  div.className = `message ${cls}`;
+  div.id = id;
+  div.innerHTML = html;
+  chat.appendChild(div);
+  chat.scrollTop = chat.scrollHeight;
+  return id;
+}
+function updateMessage(id, html) {
+  const el = document.getElementById(id);
+  if (el) { el.innerHTML = html; chat.scrollTop = chat.scrollHeight; }
+}
+function removeMessage(id) {
+  const el = document.getElementById(id);
+  if (el) el.remove();
+}
+function appendAttachment(msgId, item) {
+  const el = document.getElementById(msgId);
+  if (!el) return;
+  const wrap = document.createElement('div');
+  wrap.className = 'attach-wrap';
+  const url = URL.createObjectURL(item.blob);
+  let inner = '';
+  if (item.type === 'image') inner = `<img src="${url}">`;
+  else if (item.type === 'audio') inner = `<audio controls src="${url}"></audio>`;
+  else if (item.type === 'video') inner = `<video controls src="${url}"></video>`;
+  wrap.innerHTML = `<div class="attach-label">📎 ${escapeHtml(item.name)}</div>${inner}`;
+  el.appendChild(wrap);
+  chat.scrollTop = chat.scrollHeight;
+}
+
+const folderMeta = {
+  image: { emoji: '📷', label: 'Imagens' },
+  audio: { emoji: '🎵', label: 'Áudios' },
+  video: { emoji: '🎬', label: 'Vídeos' },
+  text:  { emoji: '📄', label: 'Textos' },
+  other: { emoji: '📁', label: 'Outros' },
+};
+
+/* ================= Modelos (transformers.js) ================= */
+let embedder = null, asr = null, generator = null, modelsReady = false;
+const headerStatus = document.getElementById('header-status');
+const loadBanner = document.getElementById('load-banner');
+const loadText = document.getElementById('load-text');
+const loadFill = document.getElementById('load-fill');
+
+function setLoad(text, pct) {
+  loadText.textContent = text;
+  if (typeof pct === 'number') loadFill.style.width = Math.max(0, Math.min(100, pct)) + '%';
+}
+
+async function loadModels() {
+  try {
+    setLoad('Carregando memória semântica (busca inteligente)...', 5);
+    embedder = await pipeline('feature-extraction', 'Xenova/multilingual-e5-small', {
+      progress_callback: (p) => { if (p.progress) setLoad('Baixando memória semântica: ' + Math.round(p.progress) + '%', p.progress * 0.33); }
+    });
+
+    setLoad('Carregando ouvido (transcrição de áudio/vídeo)...', 34);
+    asr = await pipeline('automatic-speech-recognition', 'Xenova/whisper-tiny', {
+      progress_callback: (p) => { if (p.progress) setLoad('Baixando ouvido: ' + Math.round(p.progress) + '%', 34 + p.progress * 0.16); }
+    });
+
+    setLoad('Carregando cérebro (modelo de linguagem)... isso é o mais pesado', 50);
+    generator = await pipeline('text-generation', 'onnx-community/Qwen2.5-0.5B-Instruct', {
+      dtype: 'q4',
+      progress_callback: (p) => { if (p.progress) setLoad('Baixando cérebro: ' + Math.round(p.progress) + '%', 50 + p.progress * 0.5); }
+    });
+
+    modelsReady = true;
+    setLoad('Tudo pronto! ✅', 100);
+    headerStatus.textContent = 'Online — rodando local no celular';
+    setTimeout(() => { loadBanner.style.display = 'none'; }, 900);
+    appendMessage('Pronto! 🧠 Estou rodando <b>inteiramente no seu celular</b>, sem internet nem API externa depois deste carregamento. Manda foto, áudio, vídeo ou texto pelo 📎 que eu guardo e uso pra te responder melhor. Toca no 🎤 pra falar comigo.', 'msg-bot');
+  } catch (err) {
+    console.error(err);
+    setLoad('❌ Erro ao carregar: ' + err.message, 0);
+    headerStatus.textContent = 'Erro ao carregar modelos';
+    appendMessage('⚠️ Não consegui carregar os modelos de IA. Verifique sua internet (só é necessária nesse primeiro carregamento) e recarregue a página. Detalhe técnico: ' + escapeHtml(err.message), 'msg-system');
+  }
+}
+
+async function embed(text) {
+  if (!embedder || !text || !text.trim()) return null;
+  const out = await embedder(text, { pooling: 'mean', normalize: true });
+  return Array.from(out.data);
+}
+
+function cosine(a, b) {
+  if (!a || !b) return -1;
+  let dot = 0, na = 0, nb = 0;
+  for (let i = 0; i < a.length; i++) { dot += a[i] * b[i]; na += a[i] * a[i]; nb += b[i] * b[i]; }
+  return dot / (Math.sqrt(na) * Math.sqrt(nb) + 1e-8);
+}
+
+async function retrieve(query, topK = 3) {
+  const qEmb = await embed(query);
+  if (!qEmb) return [];
+  const items = await getAllItems();
+  const scored = items.filter(i => i.embedding).map(i => ({ ...i, score: cosine(qEmb, i.embedding) }));
+  scored.sort((a, b) => b.score - a.score);
+  return scored.slice(0, topK).filter(i => i.score > 0.62);
+}
+
+/* ================= Upload de arquivos ================= */
+function classify(file) {
+  if (file.type.startsWith('image/')) return 'image';
+  if (file.type.startsWith('audio/')) return 'audio';
+  if (file.type.startsWith('video/')) return 'video';
+  if (file.type.startsWith('text/') || file.name.endsWith('.md')) return 'text';
+  return 'other';
+}
+
+async function handleFile(file) {
+  const type = classify(file);
+  const meta = folderMeta[type];
+  appendMessage(`📎 Recebendo <b>${escapeHtml(file.name)}</b> (${meta.label})...`, 'msg-system');
+  let textContent = '';
+
+  if (type === 'text') {
+    try { textContent = await file.text(); } catch (e) { textContent = ''; }
+  } else if (type === 'image') {
+    const caption = window.prompt(`Descreva rapidamente "${file.name}" (ajuda a IA a lembrar depois, pode deixar em branco):`, '');
+    textContent = caption || '';
+  } else if (type === 'audio' || type === 'video') {
+    const statusId = appendMessage(`🎙️ Transcrevendo ${escapeHtml(file.name)} localmente...`, 'msg-system');
+    try {
+      const url = URL.createObjectURL(file);
+      const result = await asr(url, { language: 'portuguese' });
+      textContent = (result && result.text) ? result.text.trim() : '';
+      updateMessage(statusId, textContent
+        ? `✅ Transcrição de ${escapeHtml(file.name)}: "${escapeHtml(textContent.slice(0, 180))}${textContent.length > 180 ? '...' : ''}"`
+        : `⚠️ Não veio texto na transcrição de ${escapeHtml(file.name)}.`);
+    } catch (err) {
+      console.error(err);
+      updateMessage(statusId, `⚠️ Não consegui transcrever ${escapeHtml(file.name)} automaticamente (formato pode não ser suportado). Vou indexar só pelo nome.`);
+    }
+  }
+
+  const embedText = `${file.name}. ${textContent}`.trim();
+  const embedding = await embed(embedText);
+  const id = await addItem({ type, name: file.name, mime: file.type, blob: file, text: textContent, embedding, createdAt: Date.now() });
+  appendMessage(`✅ <b>${escapeHtml(file.name)}</b> guardado na pasta ${meta.emoji} ${meta.label} e indexado na memória.`, 'msg-bot');
+  refreshFolderCounts();
+}
+
+document.getElementById('attach-btn').addEventListener('click', () => {
+  if (!modelsReady) { appendMessage('⏳ Espera os modelos terminarem de carregar pra eu conseguir indexar direito.', 'msg-system'); return; }
+  document.getElementById('file-input').click();
+});
+document.getElementById('file-input').addEventListener('change', async (e) => {
+  const files = Array.from(e.target.files);
+  for (const file of files) { await handleFile(file); }
+  e.target.value = '';
+});
+
+/* ================= Chat / RAG / Geração ================= */
+async function getRecentHistory(limit = 6) {
+  const all = await getAllMessages();
+  return all.slice(-limit).map(m => ({ role: m.role, content: m.content }));
+}
+
+async function respond(userText) {
+  if (!modelsReady) { appendMessage('⏳ Os modelos ainda estão carregando, espera um pouco...', 'msg-system'); return; }
+  const typingId = appendMessage('digitando...', 'msg-bot typing');
+
+  const relevant = await retrieve(userText, 3);
+  const contextText = relevant.length
+    ? relevant.map(r => `- [${folderMeta[r.type].label}] ${r.name}: ${(r.text || '(sem descrição)').slice(0, 300)}`).join('\n')
+    : 'Nada relevante encontrado na memória do usuário para esta pergunta.';
+
+  const history = await getRecentHistory(6);
+
+  const messages = [
+    { role: 'system', content:
+      'Você é a IA pessoal do DiamanteBlack, rodando 100% local no celular dele, sem servidor externo. ' +
+      'Responda sempre em português do Brasil, de forma direta, natural e inteligente — nunca com respostas decoradas ou robóticas. ' +
+      'Você tem acesso a uma memória (RAG) com arquivos que o usuário guardou no celular (fotos, áudios, vídeos, textos). ' +
+      'Use o CONTEXTO abaixo somente se for realmente relevante para a pergunta; se não for, ignore e responda normalmente. ' +
+      'Quando um item do contexto for relevante, cite o nome do arquivo na resposta.\n\nCONTEXTO DA MEMÓRIA:\n' + contextText
+    },
+    ...history,
+    { role: 'user', content: userText }
+  ];
+
+  removeMessage(typingId);
+  const botId = appendMessage('▍', 'msg-bot');
+  let acc = '';
+  try {
+    const streamer = new TextStreamer(generator.tokenizer, {
+      skip_prompt: true,
+      skip_special_tokens: true,
+      callback_function: (tok) => { acc += tok; updateMessage(botId, escapeHtml(acc) + '▍'); }
+    });
+    const out = await generator(messages, { max_new_tokens: 220, temperature: 0.7, do_sample: true, streamer });
+    const finalText = out[0].generated_text.at(-1).content.trim();
+    updateMessage(botId, escapeHtml(finalText));
+    await addMessage({ role: 'user', content: userText, createdAt: Date.now() });
+    await addMessage({ role: 'assistant', content: finalText, createdAt: Date.now() });
+
+    relevant.forEach(item => appendAttachment(botId, item));
+    speak(finalText);
+  } catch (err) {
+    console.error(err);
+    updateMessage(botId, '⚠️ Deu erro ao gerar a resposta: ' + escapeHtml(err.message));
+  }
+}
+
+async function sendMessage() {
+  const text = input.value.trim();
+  if (!text) return;
+  appendMessage(escapeHtml(text), 'msg-user');
+  input.value = '';
+  await respond(text);
+}
+document.getElementById('send-btn').addEventListener('click', sendMessage);
+input.addEventListener('keypress', (e) => { if (e.key === 'Enter') sendMessage(); });
+
+/* ================= Voz (entrada e saída) ================= */
+let ttsEnabled = true;
+document.getElementById('tts-toggle').addEventListener('click', (e) => {
+  ttsEnabled = !ttsEnabled;
+  e.target.textContent = ttsEnabled ? '🔊' : '🔇';
+  e.target.classList.toggle('active-tts', ttsEnabled);
+  if (!ttsEnabled) window.speechSynthesis.cancel();
+});
+function speak(text) {
+  if (!ttsEnabled || !('speechSynthesis' in window)) return;
+  window.speechSynthesis.cancel();
+  const u = new SpeechSynthesisUtterance(text);
+  u.lang = 'pt-BR';
+  window.speechSynthesis.speak(u);
+}
+
+const micBtn = document.getElementById('mic-btn');
+let recognition = null;
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+if (SR) {
+  recognition = new SR();
+  recognition.lang = 'pt-BR';
+  recognition.interimResults = false;
+  recognition.onresult = (e) => {
+    input.value = e.results[0][0].transcript;
+    micBtn.classList.remove('recording');
+    sendMessage();
+  };
+  recognition.onerror = () => micBtn.classList.remove('recording');
+  recognition.onend = () => micBtn.classList.remove('recording');
+}
+micBtn.addEventListener('click', () => {
+  if (!recognition) { appendMessage('⚠️ Seu navegador não suporta reconhecimento de voz por aqui.', 'msg-system'); return; }
+  if (!modelsReady) { appendMessage('⏳ Espera os modelos carregarem primeiro.', 'msg-system'); return; }
+  micBtn.classList.add('recording');
+  recognition.start();
+});
+
+/* ================= Painel de configurações / pastas ================= */
+const settingsPanel = document.getElementById('settings-panel');
+const settingsBody = document.getElementById('settings-body');
+const settingsTitle = document.getElementById('settings-title');
+
+document.getElementById('settings-btn').addEventListener('click', () => { openFolderGrid(); settingsPanel.classList.add('open'); });
+document.getElementById('settings-back').addEventListener('click', () => {
+  if (settingsTitle.textContent !== 'Memória da IA') { openFolderGrid(); }
+  else { settingsPanel.classList.remove('open'); }
+});
+
+async function refreshFolderCounts() {
+  if (settingsTitle.textContent === 'Memória da IA') openFolderGrid();
+}
+
+async function openFolderGrid() {
+  settingsTitle.textContent = 'Memória da IA';
+  const items = await getAllItems();
+  const counts = { image: 0, audio: 0, video: 0, text: 0, other: 0 };
+  items.forEach(i => counts[i.type] = (counts[i.type] || 0) + 1);
+
+  let storageLine = '';
+  if (navigator.storage && navigator.storage.estimate) {
+    try {
+      const est = await navigator.storage.estimate();
+      const usedMB = (est.usage / (1024 * 1024)).toFixed(1);
+      storageLine = `<div class="storage-info">Usando ~${usedMB} MB de armazenamento local (arquivos + modelos de IA em cache).</div>`;
+    } catch (e) {}
+  }
+
+  settingsBody.innerHTML = `
+    <div class="folder-grid">
+      ${Object.entries(folderMeta).map(([type, m]) => `
+        <div class="folder-card" data-type="${type}">
+          <div class="emoji">${m.emoji}</div>
+          <div class="label">${m.label}</div>
+          <div class="count">${counts[type] || 0}</div>
+        </div>
+      `).join('')}
+    </div>
+    ${storageLine}
+  `;
+  settingsBody.querySelectorAll('.folder-card').forEach(card => {
+    card.addEventListener('click', () => openFolderList(card.dataset.type));
+  });
+}
+
+async function openFolderList(type) {
+  const meta = folderMeta[type];
+  settingsTitle.textContent = `${meta.emoji} ${meta.label}`;
+  const items = (await getAllItems()).filter(i => i.type === type).sort((a, b) => b.createdAt - a.createdAt);
+
+  if (!items.length) {
+    settingsBody.innerHTML = `<div class="empty-hint">Nada guardado aqui ainda. Manda algo pelo 📎 no chat.</div>`;
+    return;
+  }
+
+  settingsBody.innerHTML = `<div class="file-list">${items.map(i => `
+    <div class="file-row" data-id="${i.id}">
+      <div class="thumb">${i.type === 'image' ? `<img src="${URL.createObjectURL(i.blob)}" style="width:100%;height:100%;object-fit:cover;border-radius:8px;">` : meta.emoji}</div>
+      <div class="meta">
+        <div class="name">${escapeHtml(i.name)}</div>
+        <div class="desc">${escapeHtml((i.text || 'sem descrição').slice(0, 60))}</div>
+      </div>
+      <button class="del" data-id="${i.id}">🗑</button>
+    </div>
+  `).join('')}</div>`;
+
+  settingsBody.querySelectorAll('.del').forEach(btn => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      await deleteItem(parseInt(btn.dataset.id));
+      openFolderList(type);
+    });
+  });
+}
+
+/* ================= Boot ================= */
+(async function boot() {
+  const history = await getAllMessages();
+  history.forEach(m => appendMessage(escapeHtml(m.content), m.role === 'user' ? 'msg-user' : 'msg-bot'));
+  loadModels();
+})();
+</script>
+</body>
+</html>
